@@ -67,8 +67,37 @@ rotdata1 = rotdata1 %>% mutate(P11 = prob_corn_lstate1, P01 = prob_corn_lstate0,
                                me_sr_pc=  me_P11_pc*lr_prob_corn + me_P01_pc*(1-lr_prob_corn),
                                me_sr_ps=  me_P11_ps*lr_prob_corn + me_P01_ps*(1-lr_prob_corn))
 
-##################### Table 3
+###################### Table 3
+coelcorn = rotdata1 %>% filter(sample_mon == 1) %>%
+  select(ac_clu,cons_lstate1,me_pc_lstate1,me_ps_lstate1,
+         me_precip_lstate1,me_clay_lstate1,me_silt_lstate1,me_slope_lstate1,me_trend_lstate1,me_irr_lstate1)
 
+coelsoy  = rotdata1 %>% filter(sample_mon == 1) %>%
+  select(ac_clu,cons_lstate0,me_pc_lstate0,me_ps_lstate0,
+         me_precip_lstate0,me_clay_lstate0,me_silt_lstate0,me_slope_lstate0,me_trend_lstate0,me_irr_lstate0)
+table3 = data.frame(lcorn = apply(coelcorn[,-1],2,function(x) weighted.mean(x,w = coelcorn$ac_clu)),
+                    lsoy  = apply(coelsoy[,-1],2,function(x) weighted.mean(x,w = coelsoy$ac_clu)))
+rm(coelcorn,coelsoy)
+
+###################### Table 2 column 1
+avg_corn = 0.54
+avg_pc   = 3.18
+avg_ps   = 7.56
+avg_soy  = 1-avg_corn
+
+marginal = rotdata1 %>% select(ac_clu,me_sr_pc,me_lr_pc,me_sr_ps,me_lr_ps)
+marginal = data.frame(t(apply(marginal[-1], 2, function(x) weighted.mean(x,w=marginal$ac_clu))))
+marginal = marginal %>% mutate(diff = (me_lr_pc - me_sr_pc)/me_lr_pc)
+table2   = c(marginal$me_sr_pc*avg_pc/avg_corn, # corn elasticities own short
+             marginal$me_lr_pc*avg_pc/avg_corn, # own long
+             marginal$me_sr_ps*avg_ps/avg_corn, # cross short
+             marginal$me_lr_ps*avg_ps/avg_corn, # cross long
+             -marginal$me_sr_ps*avg_ps/avg_soy, # soybeans elasticities own short
+             -marginal$me_lr_ps*avg_ps/avg_soy, # own long
+             -marginal$me_sr_pc*avg_pc/avg_soy, # cross short
+             -marginal$me_lr_pc*avg_pc/avg_soy, # cross long
+             marginal$diff
+)
 ```
 
 
