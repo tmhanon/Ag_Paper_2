@@ -100,6 +100,114 @@ table2   = c(marginal$me_sr_pc*avg_pc/avg_corn, # corn elasticities own short
 )
 ```
 
+```{r bootstrap with different time trends}
+########### pseudo code 
+# 1.a function called rotational, given a dataframe and formula yields table3 and table 2 col1 results and choose to return data with xb and epshat.
+# 2.a function called bootrot given dataframe, formula and number of iterations, first pass dataframe and formula to rotational (dataout = T) once. Then using returned dataframe from step 1, get a new dataframe with dependent variable wildy. save the first results as well as the results from iteration.
+
+rotdata1  = rotdata %>% filter(is.na(my_sample_rot)==F) # drop variable with NA my_sample_rot
+rotdata1  = rotdata1 %>% mutate(my_reg_rot = group_indices_(rotdata1,.dots = c("my_sample_rot","my_mlra"))) # create my_reg_rot
+summary(rotdata1$my_reg_rot[which(rotdata1$sample_cs==1)]) # never monoculture sample indices from 25 to 48
+nevermono = min(summary(rotdata1$my_reg_rot[which(rotdata1$sample_cs==1)])) 
+rotdata1  = rotdata1 %>% mutate(my_reg_rot = ifelse(my_reg_rot>=nevermono,nevermono,my_reg_rot)) # change never monoculture to 25
+rotdata1  = rotdata1[,-c(46:79)] # delete all storage variables
+rotdata1  = rotdata1 %>% mutate(prob_corn_lstate0=NA,prob_corn_lstate1=NA)
+
+rotational  = function(df,formu,dataout=F){
+  df        = df %>% mutate(p_c0=NA, p_s0=NA, p_c1 = NA, p_s1 = NA)
+  monoid    = sort(unique(df$my_reg_rot[df$sample_mon==1]))
+  nmonoid   = sort(unique(df$my_reg_rot[df$sample_cs==1]))
+  invar     = all.vars(formu)[-1]
+  estimates = as.data.frame(matrix(NA,ncol = (length(invar)+1)*2 + 1 + 1)) # estimates + weights + my_reg_rot
+  colnames(estimates)[-c(1,2)] = paste0(rep(c("const",invar),times = 2),rep(c(0,1),each = length(invar)+1))
+  colnames(estimates)[1:2]  = c("my_reg_rot","ac_clu")
+  for (i in monoid){
+    res0    = lm(formu, data = filter(df,sample_mon==1 & my_reg_rot == i & lcorn== 0), weights = ac_clu)
+    res1    = lm(formu, data = filter(df,sample_mon==1 & my_reg_rot == i & lcorn== 1), weights = ac_clu)
+    rows    = which(df$sample_mon==1 & df$my_reg_rot == i)
+    n       = length(rows)
+    tempest = c(as.numeric(summary(res0)$coefficients[,"Estimate"]),as.numeric(summary(res1)$coefficients[,"Estimate"]))
+    temp    = data.frame(my_reg_rot = rep(i,n),
+                         ac_clu = df$ac_clu[rows],
+                         matrix(rep(tempest,n),ncol = (length(invar)+1)*2,nrow = n ,byrow = T))
+    colnames(temp) =  colnames(estimates) # estimates column names match in order to append
+    df[rows,c("p_c0","p_s0","p_c1","p_s1")] = temp[,c("p_c0","p_s0","p_c1","p_s1")] # store to use in table 2
+    estimates = rbind(estimates,temp)[-1,]
+    rm(temp,tempest,n)
+    
+    df[rows,which(colnames(df) == "prob_corn_lstate0")]  = predict(res0,df[rows,])
+    df[rows,which(colnames(df) == "prob_corn_lstate1")]  = predict(res1,df[rows,])
+
+    rows = which(df$sample_mon == 1 & df$my_reg_rot == i & df$lcorn == 0)
+    df[rows,which(colnames(df) == "xb")]          = predict(res0)
+    df[rows,which(colnames(df) == "epshat")]      = resid(res0)
+
+    rows = which(df$sample_mon == 1 & df$my_reg_rot == i & df$lcorn == 1)
+    df[rows,which(colnames(df) == "xb")]          = predict(res1)
+    df[rows,which(colnames(df) == "epshat")]      = resid(res1)
+  }
+  ##### before append never monoculture print results for table 3
+  table3 = data.frame(t(apply(estimates[,-c(1:2)],2,function(x) weighted.mean(x,w = estimates$ac_clu))))
+
+  ###### append never monoculture (since elasticities include never monomculture)
+  rows = which(df$sample_cs == 1)
+  n    = length(rows)
+  df[rows,"prob_corn_lstate0"] = 1
+  df[rows,"prob_corn_lstate1"] = 0
+  df[rows,"xb"] = df[rows,"corn"]
+  df[rows,"epshat"] = 0
+  df[rows,"p_c0"] = 0
+  df[rows,"p_s0"] = 0
+  df[rows,"p_c1"] = 0
+  df[rows,"p_s1"] = 0
+  
+  temp = data.frame(my_reg_rot = rep(nmonoid,n),ac_clu = df[rows,"ac_clu"],matrix(0,nrow = n,ncol = (length(invar)+1)*2))
+  colnames(temp) = colnames(estimates)
+  estimates = rbind(estimates,temp)
+  rm(n,temp)
+  ###### table 2 estimates
+  ###### calculate Phis
+  df = df %>% mutate(P11 = prob_corn_lstate1, P01 = prob_corn_lstate0,
+                               me_P11_pc = p_c1, me_P01_pc = p_c0,
+                               me_P11_ps = p_s1, me_P01_ps = p_s0) %>%
+                        mutate(lr_prob_corn=P01/(1-P11+P01),
+                               me_lr_pc= (me_P01_pc*(1-P11)+me_P11_pc*P01)/(1-P11+P01)^2,
+                               me_lr_ps= (me_P01_ps*(1-P11)+me_P11_ps*P01)/(1-P11+P01)^2,
+                               me_sr_pc=  me_P11_pc*lr_prob_corn + me_P01_pc*(1-lr_prob_corn),
+                               me_sr_ps=  me_P11_ps*lr_prob_corn + me_P01_ps*(1-lr_prob_corn))
+  avg_corn = 0.54
+  avg_pc   = 3.18
+  avg_ps   = 7.56
+  avg_soy  = 1-avg_corn
+
+  marginal = df %>% select(ac_clu,me_sr_pc,me_lr_pc,me_sr_ps,me_lr_ps)
+  marginal = data.frame(t(apply(marginal[-1], 2, function(x) weighted.mean(x,w=marginal$ac_clu))))
+  marginal = marginal %>% mutate(diff = (me_lr_pc - me_sr_pc)/me_lr_pc)
+  table2   = c(marginal$me_sr_pc*avg_pc/avg_corn, # corn elasticities own short
+             marginal$me_lr_pc*avg_pc/avg_corn, # own long
+             marginal$me_sr_ps*avg_ps/avg_corn, # cross short
+             marginal$me_lr_ps*avg_ps/avg_corn, # cross long
+             -marginal$me_sr_ps*avg_ps/avg_soy, # soybeans elasticities own short
+             -marginal$me_lr_ps*avg_ps/avg_soy, # own long
+             -marginal$me_sr_pc*avg_pc/avg_soy, # cross short
+             -marginal$me_lr_pc*avg_pc/avg_soy, # cross long
+             marginal$diff)                     # difference
+  table2   = as.data.frame(t(table2))
+  colnames(table2) = c("c_own_sh","c_own_lo","c_cro_sh","c_cro_lo","s_own_sh","s_own_lo","s_cro_sh","s_cro_lo","diff")
+  if (isTRUE(dataout)){
+    return(llist(estimates = estimates, df = df, table3 = table3, table2 = table2))
+  }
+  else{
+    return(llist(estimates = estimates, table3 = table3,table2 = table2))}
+}
+
+
+test = rotational(rotdata1,corn~p_c + p_s + trend + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,dataout = T)
+
+
+
+
+```
 
 
 
