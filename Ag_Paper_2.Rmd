@@ -218,13 +218,6 @@ table2 = t(rbind.fill(lineartime$table2,quatime$table2,notime$table2))
 colnames(table2) = c("Linear","Quadratic","No Trend")
 stargazer(table2,header = F,summary = F, title = "Supply Elasticities")
 
-################# price changes over time 
-prices = rotdata1 %>% select(year,p_c,p_s)
-colnames(prices) = c("year","corn","soybeans")
-prices = prices[sapply(sort(unique(prices$year)),function(x) which(prices$year==x)[1]),]
-
-
-pairs(paircheck)
 ```
 
 
