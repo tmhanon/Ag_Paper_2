@@ -18,6 +18,7 @@ library(rms)
 library(sandwich)
 library(lmtest)
 library(AER)
+library(plyr)
 ```
 
 ```{r read dta from local directory}
@@ -195,18 +196,35 @@ rotational  = function(df,formu,dataout=F){
   table2   = as.data.frame(t(table2))
   colnames(table2) = c("c_own_sh","c_own_lo","c_cro_sh","c_cro_lo","s_own_sh","s_own_lo","s_cro_sh","s_cro_lo","diff")
   if (isTRUE(dataout)){
-    return(llist(estimates = estimates, df = df, table3 = table3, table2 = table2))
+    return(llist(df = df, table3 = table3, table2 = table2))
   }
   else{
-    return(llist(estimates = estimates, table3 = table3,table2 = table2))}
+    return(llist(table3 = table3, table2 = table2))}
 }
 
 
-test = rotational(rotdata1,corn~p_c + p_s + trend + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,dataout = T)
+lineartime = rotational(rotdata1, corn~p_c + p_s + trend + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,dataout = F)
+
+rotdata1$trend2 = rotdata1$trend^2
+quatime = rotational(rotdata1,corn~p_c + p_s + trend + trend2 + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,dataout = F)
+
+notime = rotational(rotdata1, corn~p_c + p_s + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,dataout = F)
+
+table3 = t(rbind.fill(lineartime$table3,quatime$table3,notime$table3))
+colnames(table3) = c("Linear","Quadratic","No Trend")
+stargazer(table3,header = F,summary = F,title = "Regression Estimates")
+
+table2 = t(rbind.fill(lineartime$table2,quatime$table2,notime$table2))
+colnames(table2) = c("Linear","Quadratic","No Trend")
+stargazer(table2,header = F,summary = F, title = "Supply Elasticities")
+
+################# price changes over time 
+prices = rotdata1 %>% select(year,p_c,p_s)
+colnames(prices) = c("year","corn","soybeans")
+prices = prices[sapply(sort(unique(prices$year)),function(x) which(prices$year==x)[1]),]
 
 
-
-
+pairs(paircheck)
 ```
 
 
