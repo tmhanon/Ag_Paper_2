@@ -2,3 +2,10 @@
 .Rhistory
 .RData
 .Ruserdata
+data/
+Crop Supply Dynamics/
+results/assumed_mono_cs_final.csv
+results/combined_mono_cs_final.csv
+results/cs_final.csv
+results/mono_final.csv
+shanchao.Rmd

@@ -18,4 +18,483 @@ library(lmtest)
 library(AER)
 ```
 
+```{r import data}
+data <- read.dta13("data/dyn_supply_rot_1year.dta")
+data <- data %>%
+  select(id_clu:my_mlra)
+memory.limit(size = 18000)
+```
+
+```{r split into monoculture at least once}
+# Get rid of missing my_sample_rot observations:
+data <- data %>%
+  filter(!is.na(my_sample_rot))
+
+# Create my_reg_rot variable:
+data$my_reg_rot <- data %>%
+  group_indices(my_sample_rot, my_mlra)
+  
+# Split data into observations with monoculture at least once (mono) and nevery monoculture (cs):
+mono <- data %>%
+  filter(sample_mon == 1)
+
+# Drop unnecessary data:
+rm(list = ls()[!ls() %in% c("mono")])
+gc()
+```
+
+```{r mono regressions}
+# Run regressions and predict values by group:
+mono_regressions <- mono %>%
+  group_by(my_reg_rot, lcorn) %>%
+  do(model = lm(corn ~ p_c + p_s + trend + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,
+     weights = ac_clu,
+     data = .))
+mono_results <- mono_regressions %>%
+  tidy(model)
+
+# Clean up memory:
+gc()
+```
+
+```{r predict values and combine results for mono}
+# Move around coefficient estimates:
+mono_coefs <- mono_results %>%
+  select(lcorn, my_reg_rot, term, estimate) %>%
+  spread(key = term, value = estimate)
+colnames(mono_coefs)[colnames(mono_coefs) == "(Intercept)"] <- "intercept"
+mono_coefs_0 <- mono_coefs %>%
+  filter(lcorn == 0)
+colnames(mono_coefs_0) <- paste(colnames(mono_coefs_0), "0", sep = "_")
+colnames(mono_coefs_0)[colnames(mono_coefs_0) == "my_reg_rot_0"] <- "my_reg_rot"
+mono_coefs_1 <- mono_coefs %>%
+  filter(lcorn == 1)
+colnames(mono_coefs_1) <- paste(colnames(mono_coefs_1), "1", sep = "_")
+colnames(mono_coefs_1)[colnames(mono_coefs_1) == "my_reg_rot_1"] <- "my_reg_rot"
+mono_coef <- bind_cols(mono_coefs_0, mono_coefs_1) %>%
+  ungroup %>%
+  select(my_reg_rot, intercept_0:trend_0, intercept_1:trend_1)
+rm(mono_coefs, mono_coefs_0, mono_coefs_1)
+
+# Initialize Probability Variables:
+mono$prob_corn_lstate0 <- NA
+mono$prob_corn_lstate1 <- NA
+
+# Predict values and put in Probability Variables, plus combine with coefficients:
+for (i in min(mono$my_reg_rot):max(mono$my_reg_rot)) {
+  mono_this_rot <- mono %>%
+    filter(my_reg_rot == i) %>%
+    select(id_clu:prob_corn_lstate1)
+  mono_other <- mono %>%
+    filter(my_reg_rot != i)
+  rows = nrow(mono_this_rot)
+  mono_reg_this_rot <- mono_regressions %>%
+    filter(my_reg_rot == i)
+  coef_this_rot <- mono_coef %>%
+    filter(my_reg_rot == i)
+  coef_repeated <- coef_this_rot %>%
+    slice(rep(row_number(), rows)) %>%
+    select(-my_reg_rot)
+  for (j in 1:2) {
+    mono_predicted <- predict(mono_reg_this_rot$model[[j]], mono_this_rot)
+    varname = paste0("prob_corn_lstate", j - 1)
+    mono_this_rot[[varname]] <- mono_predicted
+  }
+  mono_this_rot <- bind_cols(mono_this_rot, coef_repeated)
+  mono <- bind_rows(mono_other, mono_this_rot)
+  rm(mono_this_rot, mono_other, mono_reg_this_rot, mono_predicted, coef_repeated, coef_this_rot)
+  gc()
+}
+
+# Clear unnecessary data (for memory considerations):
+rm(list = ls()[!ls() %in% c("mono")])
+gc()
+```
+
+```{r}
+# Calculate mono new values:
+mono <- mono %>%
+  mutate(
+    lr_prob_corn = prob_corn_lstate0 / (1 - prob_corn_lstate1 + prob_corn_lstate0),
+    me_lr_pc = (p_c_0 * (1 - prob_corn_lstate1) + p_c_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_lr_ps = (p_s_0 * (1 - prob_corn_lstate1) + p_s_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_sr_pc = p_c_1 * lr_prob_corn + p_c_0 * (1 - lr_prob_corn),
+    me_sr_ps = p_s_1 * lr_prob_corn + p_s_0 * (1 - lr_prob_corn)
+  )
+
+# Calculate Marginal Effects
+mono_marginal_effects <- mono %>%
+  summarise(sr_pc = weighted.mean(me_sr_pc, ac_clu),
+            lr_pc = weighted.mean(me_lr_pc, ac_clu),
+            sr_ps = weighted.mean(me_sr_ps, ac_clu),
+            lr_ps = weighted.mean(me_lr_ps, ac_clu),
+            lrsr_diff = (weighted.mean(me_lr_pc, ac_clu) - weighted.mean(me_sr_pc, ac_clu)) / weighted.mean(me_lr_pc, ac_clu)
+            )
+
+# Collect coefficients across regressions with lcorn = 1, lcorn = 0, and mono or cs:
+mono_final_coefs <- mono %>%
+  summarise(me_pc_lstate0 = weighted.mean(p_c_0, ac_clu),
+            me_pc_lstate1 = weighted.mean(p_c_1, ac_clu),
+            me_ps_lstate0 = weighted.mean(p_s_0, ac_clu),
+            me_ps_lstate1 = weighted.mean(p_s_1, ac_clu),
+            me_precip_lstate0 = weighted.mean(precip0405_binary_0, ac_clu),
+            me_precip_lstate1 = weighted.mean(precip0405_binary_1, ac_clu),
+            me_clay_lstate0 = weighted.mean(clay_perc_0, ac_clu),
+            me_clay_lstate1 = weighted.mean(clay_perc_1, ac_clu),
+            me_silt_lstate0 = weighted.mean(silt_perc_0, ac_clu),
+            me_silt_lstate1 = weighted.mean(silt_perc_1, ac_clu),
+            me_slope_lstate0 = weighted.mean(slopegradwta_0, ac_clu),
+            me_slope_lstate1 = weighted.mean(slopegradwta_1, ac_clu),
+            me_trend_lstate0 = weighted.mean(trend_0, ac_clu),
+            me_trend_lstate1 = weighted.mean(trend_1, ac_clu),
+            me_irr_lstate0 = weighted.mean(irr_share_0, ac_clu),
+            me_irr_lstate1 = weighted.mean(irr_share_1, ac_clu),
+            cons_lstate0 = weighted.mean(intercept_0, ac_clu),
+            cons_lstate1 = weighted.mean(intercept_1, ac_clu)
+            )
+
+# Output results for later use:
+write.csv(mono, file = "results/mono_final.csv")
+write.csv(mono_final_coefs, file = "results/mono_final_coefs.csv")
+write.csv(mono_marginal_effects, file = "results/mono_marginal_effects.csv")
+
+# Clear Memory
+rm(list = ls())
+gc()
+```
+
+```{r split into never monoculture}
+# Clear out memory
+rm(list = ls())
+gc()
+
+#Load Data and Clean Up
+data <- read.dta13("data/dyn_supply_rot_1year.dta")
+data <- data %>%
+  select(id_clu:my_mlra)
+
+# Get rid of missing my_sample_rot observations:
+data <- data %>%
+  filter(!is.na(my_sample_rot))
+
+# Create my_reg_rot variable:
+data$my_reg_rot <- data %>%
+  group_indices(my_sample_rot, my_mlra)
+
+# Split data into observations with monoculture at least once (mono) and nevery monoculture (cs):
+cs <- data %>%
+  filter(sample_cs == 1)
+
+# Drop unnecessary data:
+rm(list = ls()[!ls() %in% c("cs")])
+gc()
+```
+
+```{r cs regressions}
+cs_regressions <- cs %>%
+  group_by(my_reg_rot, lcorn) %>%
+  do(model = lm(corn ~ p_c + p_s + trend + clay_perc + silt_perc + slopegradwta + precip0405_binary + irr_share,
+     weights = ac_clu,
+     data = .))
+cs_results <- cs_regressions %>%
+  tidy(model)
+
+# Clean up memory:
+gc()
+```
+
+```{r}
+# Move around coefficient estimates:
+cs_coefs <- cs_results %>%
+  select(lcorn, my_reg_rot, term, estimate) %>%
+  spread(key = term, value = estimate)
+colnames(cs_coefs)[colnames(cs_coefs) == "(Intercept)"] <- "intercept"
+cs_coefs_0 <- cs_coefs %>%
+  filter(lcorn == 0)
+colnames(cs_coefs_0) <- paste(colnames(cs_coefs_0), "0", sep = "_")
+colnames(cs_coefs_0)[colnames(cs_coefs_0) == "my_reg_rot_0"] <- "my_reg_rot"
+cs_coefs_1 <- cs_coefs %>%
+  filter(lcorn == 1)
+colnames(cs_coefs_1) <- paste(colnames(cs_coefs_1), "1", sep = "_")
+colnames(cs_coefs_1)[colnames(cs_coefs_1) == "my_reg_rot_1"] <- "my_reg_rot"
+cs_coef <- bind_cols(cs_coefs_0, cs_coefs_1) %>%
+  ungroup %>%
+  select(my_reg_rot, intercept_0:trend_0, intercept_1:trend_1)
+rm(cs_coefs, cs_coefs_0, cs_coefs_1)
+
+# Initialize Probability Variables:
+cs$prob_corn_lstate0 <- NA
+cs$prob_corn_lstate1 <- NA
+
+# Predict values and put in Probability Variables, plus combine with coefficients:
+for (i in min(cs$my_reg_rot):max(cs$my_reg_rot)) {
+  cs_this_rot <- cs %>%
+    filter(my_reg_rot == i) %>%
+    select(id_clu:prob_corn_lstate1)
+  cs_other <- cs %>%
+    filter(my_reg_rot != i)
+  rows = nrow(cs_this_rot)
+  cs_reg_this_rot <- cs_regressions %>%
+    filter(my_reg_rot == i)
+  coef_this_rot <- cs_coef %>%
+    filter(my_reg_rot == i)
+  coef_repeated <- coef_this_rot %>%
+    slice(rep(row_number(), rows)) %>%
+    select(-my_reg_rot)
+  for (j in 1:2) {
+    cs_predicted <- predict(cs_reg_this_rot$model[[j]], cs_this_rot)
+    varname = paste0("prob_corn_lstate", j - 1)
+    cs_this_rot[[varname]] <- cs_predicted
+  }
+  cs_this_rot <- bind_cols(cs_this_rot, coef_repeated)
+  cs <- bind_rows(cs_other, cs_this_rot)
+  rm(cs_this_rot, cs_other, cs_reg_this_rot, cs_predicted, coef_repeated, coef_this_rot)
+  gc()
+}
+
+# Clear unnecessary data (for memory considerations):
+rm(list = ls()[!ls() %in% c("cs")])
+gc()
+```
+
+```{r}
+# Calculate cs new values:
+cs <- cs %>%
+  mutate(
+    lr_prob_corn = prob_corn_lstate0 / (1 - prob_corn_lstate1 + prob_corn_lstate0),
+    me_lr_pc = (p_c_0 * (1 - prob_corn_lstate1) + p_c_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_lr_ps = (p_s_0 * (1 - prob_corn_lstate1) + p_s_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_sr_pc = p_c_1 * lr_prob_corn + p_c_0 * (1 - lr_prob_corn),
+    me_sr_ps = p_s_1 * lr_prob_corn + p_s_0 * (1 - lr_prob_corn)
+  )
+
+# Calculate Marginal Effects
+cs_marginal_effects <- cs %>%
+  summarise(sr_pc = weighted.mean(me_sr_pc, ac_clu),
+            lr_pc = weighted.mean(me_lr_pc, ac_clu),
+            sr_ps = weighted.mean(me_sr_ps, ac_clu),
+            lr_ps = weighted.mean(me_lr_ps, ac_clu),
+            lrsr_diff = (weighted.mean(me_lr_pc, ac_clu) - weighted.mean(me_sr_pc, ac_clu)) / weighted.mean(me_lr_pc, ac_clu)
+            )
+
+# Collect coefficients across regressions with lcorn = 1, lcorn = 0:
+cs_final_coefs <- cs %>%
+  summarise(me_pc_lstate0 = weighted.mean(p_c_0, ac_clu),
+            me_pc_lstate1 = weighted.mean(p_c_1, ac_clu),
+            me_ps_lstate0 = weighted.mean(p_s_0, ac_clu),
+            me_ps_lstate1 = weighted.mean(p_s_1, ac_clu),
+            me_precip_lstate0 = weighted.mean(precip0405_binary_0, ac_clu),
+            me_precip_lstate1 = weighted.mean(precip0405_binary_1, ac_clu),
+            me_clay_lstate0 = weighted.mean(clay_perc_0, ac_clu),
+            me_clay_lstate1 = weighted.mean(clay_perc_1, ac_clu),
+            me_silt_lstate0 = weighted.mean(silt_perc_0, ac_clu),
+            me_silt_lstate1 = weighted.mean(silt_perc_1, ac_clu),
+            me_slope_lstate0 = weighted.mean(slopegradwta_0, ac_clu),
+            me_slope_lstate1 = weighted.mean(slopegradwta_1, ac_clu),
+            me_trend_lstate0 = weighted.mean(trend_0, ac_clu),
+            me_trend_lstate1 = weighted.mean(trend_1, ac_clu),
+            me_irr_lstate0 = weighted.mean(irr_share_0, ac_clu),
+            me_irr_lstate1 = weighted.mean(irr_share_1, ac_clu),
+            cons_lstate0 = weighted.mean(intercept_0, ac_clu),
+            cons_lstate1 = weighted.mean(intercept_1, ac_clu)
+            )
+
+# Output results for later use:
+write.csv(cs, file = "results/cs_final.csv")
+write.csv(cs_final_coefs, file = "results/cs_final_coefs.csv")
+write.csv(cs_marginal_effects, file = "results/cs_marginal_effects.csv")
+
+# Clear Memory
+rm(list = ls())
+gc()
+```
+
+
+```{r construct elements from Table 2}
+# Load in necessary data:
+mono <- read.csv("results/mono_final.csv")
+cs <- read.csv("results/cs_final.csv")
+
+# Construct Assumed zero CS Values:
+assumed_cs <- tibble(
+  prob_corn_lstate0 = 1,
+  prob_corn_lstate1 = 0,
+  p_c_0 = 0,
+  p_c_1 = 0,
+  p_s_0 = 0,
+  p_s_1 = 0,
+  trend_0 = 0,
+  trend_1 = 0
+) %>%
+  slice(rep(row_number(), 2546224)) %>%
+  bind_cols(., as.tibble(cs$ac_clu))
+colnames(assumed_cs)[colnames(assumed_cs) == "value"] <- "ac_clu"
+
+assumed_mono_cs <- bind_rows(mono, assumed_cs)
+
+# Calculate assumed_mono_cs new values:
+assumed_mono_cs <- assumed_mono_cs %>%
+  mutate(
+    lr_prob_corn = prob_corn_lstate0 / (1 - prob_corn_lstate1 + prob_corn_lstate0),
+    me_lr_pc = (p_c_0 * (1 - prob_corn_lstate1) + p_c_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_lr_ps = (p_s_0 * (1 - prob_corn_lstate1) + p_s_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_sr_pc = p_c_1 * lr_prob_corn + p_c_0 * (1 - lr_prob_corn),
+    me_sr_ps = p_s_1 * lr_prob_corn + p_s_0 * (1 - lr_prob_corn)
+  )
+
+# Calculate Marginal Effects
+assumed_mono_cs_marginal_effects <- assumed_mono_cs %>%
+  summarise(sr_pc = weighted.mean(me_sr_pc, ac_clu),
+            lr_pc = weighted.mean(me_lr_pc, ac_clu),
+            sr_ps = weighted.mean(me_sr_ps, ac_clu),
+            lr_ps = weighted.mean(me_lr_ps, ac_clu),
+            lrsr_diff = (weighted.mean(me_lr_pc, ac_clu) - weighted.mean(me_sr_pc, ac_clu)) / weighted.mean(me_lr_pc, ac_clu)
+            )
+
+# Collect coefficients across regressions with lcorn = 1, lcorn = 0, and mono or cs:
+assumed_mono_cs_final_coefs <- assumed_mono_cs %>%
+  summarise(me_pc_lstate0 = weighted.mean(p_c_0, ac_clu),
+            me_pc_lstate1 = weighted.mean(p_c_1, ac_clu),
+            me_ps_lstate0 = weighted.mean(p_s_0, ac_clu),
+            me_ps_lstate1 = weighted.mean(p_s_1, ac_clu),
+            me_precip_lstate0 = weighted.mean(precip0405_binary_0, ac_clu),
+            me_precip_lstate1 = weighted.mean(precip0405_binary_1, ac_clu),
+            me_clay_lstate0 = weighted.mean(clay_perc_0, ac_clu),
+            me_clay_lstate1 = weighted.mean(clay_perc_1, ac_clu),
+            me_silt_lstate0 = weighted.mean(silt_perc_0, ac_clu),
+            me_silt_lstate1 = weighted.mean(silt_perc_1, ac_clu),
+            me_slope_lstate0 = weighted.mean(slopegradwta_0, ac_clu),
+            me_slope_lstate1 = weighted.mean(slopegradwta_1, ac_clu),
+            me_trend_lstate0 = weighted.mean(trend_0, ac_clu),
+            me_trend_lstate1 = weighted.mean(trend_1, ac_clu),
+            me_irr_lstate0 = weighted.mean(irr_share_0, ac_clu),
+            me_irr_lstate1 = weighted.mean(irr_share_1, ac_clu),
+            cons_lstate0 = weighted.mean(intercept_0, ac_clu),
+            cons_lstate1 = weighted.mean(intercept_1, ac_clu)
+            )
+
+# Output results for later use:
+write.csv(assumed_mono_cs, file = "results/assumed_mono_cs_final.csv")
+write.csv(assumed_mono_cs_final_coefs, file = "results/assumed_mono_cs_final_coefs.csv")
+write.csv(assumed_mono_cs_marginal_effects, file = "results/assumed_mono_cs_marginal_effects.csv")
+
+# Clear Memory
+rm(list = ls()[!ls() %in% c("cs", "mono")])
+gc()
+```
+
+```{r construct new Table 2 like values}
+combined_mono_cs <- bind_rows(mono, cs)
+
+# Calculate combined_mono_cs new values:
+combined_mono_cs <- combined_mono_cs %>%
+  mutate(
+    lr_prob_corn = prob_corn_lstate0 / (1 - prob_corn_lstate1 + prob_corn_lstate0),
+    me_lr_pc = (p_c_0 * (1 - prob_corn_lstate1) + p_c_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_lr_ps = (p_s_0 * (1 - prob_corn_lstate1) + p_s_1 * prob_corn_lstate0) / (1 - prob_corn_lstate1 + prob_corn_lstate0)^2,
+    me_sr_pc = p_c_1 * lr_prob_corn + p_c_0 * (1 - lr_prob_corn),
+    me_sr_ps = p_s_1 * lr_prob_corn + p_s_0 * (1 - lr_prob_corn)
+  )
+
+# Calculate Marginal Effects
+combined_mono_cs_marginal_effects <- combined_mono_cs %>%
+  summarise(sr_pc = weighted.mean(me_sr_pc, ac_clu),
+            lr_pc = weighted.mean(me_lr_pc, ac_clu),
+            sr_ps = weighted.mean(me_sr_ps, ac_clu),
+            lr_ps = weighted.mean(me_lr_ps, ac_clu),
+            lrsr_diff = (weighted.mean(me_lr_pc, ac_clu) - weighted.mean(me_sr_pc, ac_clu)) / weighted.mean(me_lr_pc, ac_clu)
+            )
+
+# Collect coefficients across regressions with lcorn = 1, lcorn = 0, and mono or cs:
+combined_mono_cs_final_coefs <- combined_mono_cs %>%
+  summarise(me_pc_lstate0 = weighted.mean(p_c_0, ac_clu),
+            me_pc_lstate1 = weighted.mean(p_c_1, ac_clu),
+            me_ps_lstate0 = weighted.mean(p_s_0, ac_clu),
+            me_ps_lstate1 = weighted.mean(p_s_1, ac_clu),
+            me_precip_lstate0 = weighted.mean(precip0405_binary_0, ac_clu),
+            me_precip_lstate1 = weighted.mean(precip0405_binary_1, ac_clu),
+            me_clay_lstate0 = weighted.mean(clay_perc_0, ac_clu),
+            me_clay_lstate1 = weighted.mean(clay_perc_1, ac_clu),
+            me_silt_lstate0 = weighted.mean(silt_perc_0, ac_clu),
+            me_silt_lstate1 = weighted.mean(silt_perc_1, ac_clu),
+            me_slope_lstate0 = weighted.mean(slopegradwta_0, ac_clu),
+            me_slope_lstate1 = weighted.mean(slopegradwta_1, ac_clu),
+            me_trend_lstate0 = weighted.mean(trend_0, ac_clu),
+            me_trend_lstate1 = weighted.mean(trend_1, ac_clu),
+            me_irr_lstate0 = weighted.mean(irr_share_0, ac_clu),
+            me_irr_lstate1 = weighted.mean(irr_share_1, ac_clu),
+            cons_lstate0 = weighted.mean(intercept_0, ac_clu),
+            cons_lstate1 = weighted.mean(intercept_1, ac_clu)
+            )
+
+# Output results for later use:
+write.csv(combined_mono_cs, file = "results/combined_mono_cs_final.csv")
+write.csv(combined_mono_cs_final_coefs, file = "results/combined_mono_cs_final_coefs.csv")
+write.csv(combined_mono_cs_marginal_effects, file = "results/combined_mono_cs_marginal_effects.csv")
+
+# Clear Memory
+rm(list = ls())
+gc()
+```
+
+```{r put together new table}
+# Store numbers for calculations:
+avg_corn <- 0.54
+avg_pc   <- 3.18
+avg_ps   <- 7.56
+avg_soy  <- 1 - avg_corn
+
+# Create Our Version of Table 2 and Table 3
+table2 <- as.tibble(c("Short-run", "Long-run", "Short-run", "Long-run",
+                      "Short-run", "Long-run", "Short-run", "Long-run", "lrsr_diff"))
+table3 <- as.tibble(c("Expected Corn Price", "Expected Soybean Price", "Large Spring Rainfall", 
+                     "Share Clay", "Share Silt", "Slope", "Trend", "Share Irrigated", "intercept"))
+for (name in c("assumed_mono_cs", "combined_mono_cs", "mono", "cs")) {
+  me_file <- paste0("results/", name, "_marginal_effects.csv")
+  me_data <- read.csv(me_file)
+  table2col <- tibble(
+    corn_sr_own   = me_data$sr_pc * (avg_pc / avg_corn),
+    corn_lr_own   = me_data$lr_pc * (avg_pc / avg_corn),
+    corn_sr_cross = me_data$sr_ps * (avg_ps / avg_corn),
+    corn_lr_cross = me_data$lr_ps * (avg_ps / avg_corn),
+    soy_sr_own    = - me_data$sr_ps * (avg_ps / avg_soy),
+    soy_lr_own    = - me_data$lr_ps * (avg_ps / avg_soy),
+    soy_sr_cross  = - me_data$sr_pc * (avg_pc / avg_soy),
+    soy_lr_cross  = - me_data$lr_pc * (avg_pc / avg_soy),
+    diff = me_data$lrsr_diff
+    ) %>%
+    t() %>%
+    as.tibble()
+  table2 <- bind_cols(table2, table2col)
+  coef_file <- paste0("results/", name, "_final_coefs.csv")
+  coef_data <- read.csv(coef_file) %>%
+    select(-X)
+  coefs_0 <- coef_data %>%
+    select(ends_with("0")) %>%
+    t() %>%
+    as.tibble()
+  coefs_1 <- coef_data %>%
+    select(ends_with("1")) %>%
+    t() %>%
+    as.tibble()
+  table3 <- bind_cols(table3, coefs_1, coefs_0)
+}
+colnames(table2) <- c("names", "assumed", "combined", "monoculture", "never monoculture")
+colnames(table3) <- c("names", "assumed_1", "assumed_0", "combined_1", "combined_0", "monoculture_1", "monoculture_0", "never_1", "never_0")
+
+# Clean up tables and round for output:
+table2[, -1] <- round(table2[, -1], 3)
+table3[, -1] <- round(table3[, -1], 3)
+table3 <- table3 %>%
+  select(-assumed_0, -assumed_1)
+
+# Output Tables
+stargazer(table2, summary = F)
+stargazer(table3, summary = F)
+
+
+```
+
+
+
 
